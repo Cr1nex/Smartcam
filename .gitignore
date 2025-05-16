@@ -1,0 +1,9 @@
+.venv/
+.weights
+.names
+.cfg
+.pt
+secrets.h
+.env
+
+

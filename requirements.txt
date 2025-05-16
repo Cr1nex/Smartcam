@@ -1,0 +1,6 @@
+flask
+opencv-python
+requests
+ultralytics
+flask-cors
+gunicorn
