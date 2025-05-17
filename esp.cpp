@@ -12,8 +12,19 @@
 const char* WIFI_SSID = "1";         
 const char* WIFI_PASSWORD = "1"; 
 
-//Encryption Configuration (MUST MATCH PYTHON SCRIPT)
-//In secrets.h
+//Encryption Configuration
+
+uint8_t aesKey[] = { 
+  0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 
+  0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C 
+};
+const uint8_t original_aesIV[]  = { 
+  0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+  0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+};
+AESLib aesLib; 
+const int AES_EFFECTIVE_BLOCK_SIZE = 16; //AES block size is 16 bytes
+
 
 //UDP Video Stream Configuration
 WiFiUDP videoUdp; 
@@ -28,7 +39,7 @@ bool pythonClientReadyForVideo = false;
 //UDP Log Forwarding Configuration
 WiFiUDP logUdp; 
 const int logUdpPort = 12346; 
-// #define DISABLE_UDP_LOG_FORWARDING 
+
 
 //Web Server for Pan/Tilt Commands (TCP/HTTP)
 WebServer commandServer(8081); 
@@ -55,17 +66,17 @@ WebServer commandServer(8081);
   #error "Camera model not selected or pins defined!"
 #endif
 
-
+//Serial Communication with Arduino using PRIMARY Serial (UART0)
 HardwareSerial& ArduinoCommsSerial = Serial; 
 
 String arduinoLogBuffer = ""; 
 
-// --- Forward Declarations for WebServer Handlers ---
+//Forward Declarations for WebServer Handlers
 void handleRoot();
 void handleCommand();
 void handlePing(); 
 void handleSignalVideoReady();
-void handleRegisterPythonClient();
+void handleRegisterPythonClient(); // For Python to register its IP
 
 //Function to decrypt data (AES-128 CBC with PKCS7 unpadding)
 String decryptCommand(const String& base64Ciphertext) {
@@ -103,7 +114,7 @@ String decryptCommand(const String& base64Ciphertext) {
 void setup() {
   ArduinoCommsSerial.begin(115200); 
   arduinoLogBuffer.reserve(64); 
-  ArduinoCommsSerial.println("\nESP32-CAM Booting (Primary Serial, Quieter Debug)...");
+  ArduinoCommsSerial.println("\nESP32-CAM Booting (Primary Serial, Quieter Debug, Dynamic Python IP)...");
   delay(1000); 
 
   //WiFi Connection
@@ -150,8 +161,8 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA; 
-  config.jpeg_quality = 12;          //Good quality
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 12;      
   config.fb_count = 2; 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) { ArduinoCommsSerial.printf("Camera init failed with error 0x%x. Rebooting...\n", err); delay(10000); ESP.restart(); return; }
@@ -176,7 +187,7 @@ void setup() {
 }
 
 unsigned long lastFrameTime = 0;
-const unsigned long frameInterval = 100; //Target ~10 FPS for VGA
+const unsigned long frameInterval = 100;
 unsigned int udp_send_failures = 0;
 unsigned long lastStatsPrintTime = 0; 
 const unsigned long statsPrintInterval = 5000; //Print frame stats every 5 seconds
@@ -192,7 +203,7 @@ void loop() {
       camera_fb_t * fb = esp_camera_fb_get();
       unsigned long t_end_capture = millis();
 
-      if (!fb) { /* ... */ } 
+      if (!fb) { /* wuuuuuuuu */ } 
       else {
         unsigned long t_start_send = millis();
         videoUdp.beginPacket(pythonClientIP, videoUdpPort); 
@@ -206,7 +217,6 @@ void loop() {
             videoUdp.write(fb->buf + bytesSent, chunkSize);
             if (videoUdp.endPacket()) { bytesSent += chunkSize; chunks++;} 
             else { 
-                //This message goes to USB and Arduino
                 ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): UDP video chunk send FAILED!"); 
                 udp_send_failures++; 
                 frame_send_success = false; 
@@ -219,16 +229,15 @@ void loop() {
             videoUdp.write((const uint8_t*)END_OF_FRAME_MARKER, strlen(END_OF_FRAME_MARKER));
             videoUdp.endPacket();
         } else if (!frame_send_success) { 
-            //This message goes to USB and Arduino
             ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Frame sending incomplete, not sending EOF.");
         }
         unsigned long t_end_send = millis();
         
-        //Print frame stats less frequently TO THE SHARED SERIAL PORT
         if (millis() - lastStatsPrintTime > statsPrintInterval) {
             ArduinoCommsSerial.printf("Frame: %uB, %uchunks. Cap: %lums, Send: %lums. Total: %lums. UDP Fails: %u (Target: %s)\n", 
                           fb->len, chunks, (t_end_capture - t_start_capture), (t_end_send - t_start_send), 
-                          (t_end_send - t_start_capture), udp_send_failures, pythonClientIP.toString().c_str());
+                          (t_end_send - t_start_capture), udp_send_failures, 
+                          (pythonClientIPLearned ? pythonClientIP.toString().c_str() : "?.?.?.?") );
             lastStatsPrintTime = millis();
         }
         esp_camera_fb_return(fb); 
@@ -245,16 +254,16 @@ void loop() {
           if (receivedChar == '\n') {
             arduinoLogBuffer.trim(); 
             if (arduinoLogBuffer.startsWith("LOG_START:") || arduinoLogBuffer.startsWith("LOG_STOP:")) {
-              
-             
-
               logUdp.beginPacket(pythonClientIP, logUdpPort); 
               logUdp.print(arduinoLogBuffer); 
               if(!logUdp.endPacket()){ ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): UDP log send failed!");}
             } 
             arduinoLogBuffer = ""; 
           }
-          if (arduinoLogBuffer.length() > 60) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Arduino log buffer overflow."); arduinoLogBuffer = "";}
+          if (arduinoLogBuffer.length() > 60) { 
+              // ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Arduino log buffer overflow."); // Kept removed
+              arduinoLogBuffer = ""; 
+          }
         }
     }
     #else 
@@ -270,8 +279,7 @@ void loop() {
         lastReconnectAttempt = millis();
     }
   }
-  delay(1); 
-}
+  delay(10);
 
 //TCP/HTTP Command Server Handlers
 void handleRoot() { 
@@ -303,7 +311,6 @@ void handleCommand(void) {
   if (decryptedCommand.length() == 0) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Cmd decryption failed."); commandServer.send(400, "text/plain", "Cmd decryption failed."); return;}
   if (decryptedCommand.startsWith("S") && decryptedCommand.indexOf(':') > 0) {
     ArduinoCommsSerial.println(decryptedCommand); //Send to Arduino via PRIMARY Serial
-    
     commandServer.send(200, "text/plain", "Encrypted cmd received, decrypted, forwarded: " + decryptedCommand);
   } else {
     ArduinoCommsSerial.print("ESP32-CAM (SharedSerial): Invalid format after decryption: '"); ArduinoCommsSerial.print(decryptedCommand); ArduinoCommsSerial.println("'");
@@ -312,7 +319,7 @@ void handleCommand(void) {
 }
 
 void handlePing() { 
-    ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Received /ping request on command server (port 8081).");
+    ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Received /ping request on port 8081.");
     commandServer.send(200, "text/plain", "pong_8081_tcp");
 }
 

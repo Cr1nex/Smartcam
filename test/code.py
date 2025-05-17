@@ -33,7 +33,7 @@ DISCOVERY_TIMEOUT = 10
 #Encryption Configuration
 AES_KEY = None
 AES_IV = None
-AES_BLOCK_SIZE = 16 # AES block size is 16 bytes
+AES_BLOCK_SIZE = 16 
 
 def load_encryption_config():
     global AES_KEY, AES_IV
@@ -50,15 +50,19 @@ def load_encryption_config():
 
         if len(AES_KEY) != 16:
             messagebox.showerror("Encryption Error", f"AES_KEY from .env file must be 16 bytes long, found {len(AES_KEY)} bytes.")
+            AES_KEY = None 
             return False
         if len(AES_IV) != 16:
             messagebox.showerror("Encryption Error", f"AES_IV from .env file must be 16 bytes long, found {len(AES_IV)} bytes.")
+            AES_IV = None
             return False
         
         print("Python: AES Key and IV loaded successfully from .env file.")
         return True
     except Exception as e:
         messagebox.showerror("Encryption Error", f"Error parsing AES_KEY_BYTES or AES_IV_BYTES from .env file: {e}\nEnsure they are comma-separated decimal byte values.")
+        AES_KEY = None
+        AES_IV = None
         return False
 UDP_VIDEO_IP_ADDRESS = "0.0.0.0"  
 UDP_VIDEO_PORT = 12345            
@@ -80,13 +84,13 @@ current_pan = 90; current_tilt = 90
 auto_tracking_enabled = False
 stop_threads = False 
 last_command_time = 0 
-COMMAND_SEND_INTERVAL = 0.5 
+COMMAND_SEND_INTERVAL = 0.75 # Kept at 0.75s from previous adjustment
 
 udp_video_socket = None
 video_frame_buffer = bytearray()
 receiving_video_frame = False
 last_valid_frame_time = 0 
-NO_SIGNAL_TIMEOUT = 5.0 #Seconds before showing "No Signal"
+NO_SIGNAL_TIMEOUT = 5.0 
 decode_error_count = 0 
 
 udp_log_socket = None
@@ -117,13 +121,17 @@ def create_placeholder_image(width, height, text="Waiting for Video Signal..."):
 
 #Encryption Function
 def encrypt_command(plaintext_command_str):
+    if AES_KEY is None or AES_IV is None:
+        print("Python: AES Key/IV not loaded properly from .env. Cannot encrypt command.")
+        # messagebox.showerror("Encryption Error", "AES Key/IV not loaded. Cannot send commands.") # Avoid rapid popups
+        return None
     try:
         cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
         padded_command_bytes = pad(plaintext_command_str.encode('utf-8'), AES_BLOCK_SIZE)
         ciphertext_bytes = cipher.encrypt(padded_command_bytes)
         base64_ciphertext_str = base64.b64encode(ciphertext_bytes).decode('utf-8')
         return base64_ciphertext_str
-    except Exception as e: print(f"Python: Encryption failed: {e}"); return None
+    except Exception as e: print(f"Python: Encryption failed for '{plaintext_command_str}': {e}"); return None
 
 #mDNS Discovery Listener
 class MyServiceListener:
@@ -207,7 +215,7 @@ def send_pan_tilt_command(pan, tilt):
     pan = int(np.clip(pan, 0, 180)); tilt = int(np.clip(tilt, 30, 150)) 
     plaintext_command = f"S{pan}:{tilt}" 
     encrypted_command_b64 = encrypt_command(plaintext_command)
-    if encrypted_command_b64 is None: print("Python: Command encryption failed."); return False
+    if encrypted_command_b64 is None: print("Python: Command encryption failed. Command not sent."); return False # Added more info
     actual_command_url = f"{ESP32_COMMAND_URL_BASE}/command"
     response_obj = None 
     try:
@@ -279,7 +287,7 @@ def udp_video_receiver_thread():
     try:
         udp_socket.bind((UDP_VIDEO_IP_ADDRESS, UDP_VIDEO_PORT))
         print(f"Python: UDP Video Receiver Listening on {UDP_VIDEO_IP_ADDRESS}:{UDP_VIDEO_PORT}")
-        udp_socket.settimeout(0.1) # Timeout for recvfrom
+        udp_socket.settimeout(0.1) 
     except socket.error as e: messagebox.showerror("UDP Socket Error", f"Video socket bind failed: {e}"); stop_threads = True; return
     
     if ESP32_COMMAND_URL_BASE:
@@ -311,7 +319,7 @@ def udp_video_receiver_thread():
                 continue
             
             if data == END_OF_FRAME_MARKER:
-                receiving_video_frame = False #Process frame after EOF
+                receiving_video_frame = False 
                 if len(video_frame_buffer) > 0:
                     try:
                         np_arr = np.frombuffer(video_frame_buffer, np.uint8)
@@ -323,41 +331,37 @@ def udp_video_receiver_thread():
                             img_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
                             img_pil = Image.fromarray(img_rgb)
                             img_tk = ImageTk.PhotoImage(image=img_pil)
-                            video_label.imgtk = img_tk #Keep reference
+                            video_label.imgtk = img_tk 
                             video_label.configure(image=img_tk)
                         else: 
                             decode_error_count += 1
-                            # print(f"Python: UDP Video - cv2.imdecode returned None (Error count: {decode_error_count})") 
                     except Exception as e: 
                         decode_error_count += 1
                         print(f"Python: UDP Video - Error processing frame: {e}")
-                video_frame_buffer = bytearray() # Clear buffer for next frame
-                continue # Go back to recvfrom
+                video_frame_buffer = bytearray(); 
+                continue
 
             if receiving_video_frame:
                 video_frame_buffer.extend(data)
         
         except socket.timeout: 
-            #This timeout is for udp_socket.recvfrom()
-            if receiving_video_frame and len(video_frame_buffer) > 0:
-                #If we were in the middle of receiving a frame and timed out (0.1s with no new packets for this frame),
-                #assume the rest of the frame (including EOF) is lost.
+            if receiving_video_frame and len(video_frame_buffer) > 0: 
                 print("Python: UDP Video - Timeout while actively receiving frame data. Discarding partial frame.")
                 video_frame_buffer = bytearray()
-                receiving_video_frame = False #Reset state to wait for a new SOF
+                receiving_video_frame = False 
             
-            #Check if it's time to show "No Signal" placeholder (overall timeout)
             if time.time() - last_valid_frame_time > NO_SIGNAL_TIMEOUT:
                 if 'video_label' in globals() and video_label.winfo_exists():
-                    is_placeholder_showing = False
+                    is_placeholder_set = False
                     try:
-                        if video_label.imgtk == placeholder_image_tk:
-                            is_placeholder_showing = True
-                    except AttributeError: pass #imgtk might not exist if no frame ever shown
+                        if hasattr(video_label, 'imgtk') and video_label.imgtk == placeholder_image_tk:
+                            is_placeholder_set = True
+                    except tk.TclError: 
+                        pass
                     
-                    if not is_placeholder_showing:
+                    if not is_placeholder_set:
                         print(f"Python: No valid video signal for {NO_SIGNAL_TIMEOUT}s. Displaying placeholder.")
-                        if placeholder_image_tk is None: #Should have been created at startup
+                        if placeholder_image_tk is None: 
                              placeholder_image_tk = create_placeholder_image(frame_width_display,frame_height_display)
                         video_label.imgtk = placeholder_image_tk 
                         video_label.configure(image=placeholder_image_tk)
@@ -369,7 +373,7 @@ def udp_video_receiver_thread():
     print("Python: UDP Video Receiver thread stopped.")
 
 #UDP Log Receiver Thread
-def udp_log_receiver_thread(): # ... (same as before) ...
+def udp_log_receiver_thread(): 
     global stop_threads, udp_log_socket, activity_log_entries
     udp_log_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -510,6 +514,15 @@ app.bind('t', lambda e: toggle_auto_tracking()); app.bind('T', lambda e: toggle_
 
 #Start Application
 if __name__ == "__main__":
+    # CRITICAL: Load encryption configuration AT THE VERY START
+    if not load_encryption_config():
+        # load_encryption_config() already shows a messagebox on error
+        if app and app.winfo_exists(): # Check if app object was created for messagebox parent
+            app.destroy()
+        else: # If app not created, print to console and exit
+            print("Python: Exiting due to encryption configuration error.")
+        exit()
+
     if not discover_esp32_cam_ip():
         print("Python: mDNS discovery failed. Prompting for IP address.")
         initial_ip_for_prompt = ESP32_CAM_IP_ADDRESS if ESP32_CAM_IP_ADDRESS else "192.168.1.100" 
@@ -531,10 +544,9 @@ if __name__ == "__main__":
         messagebox.showwarning("ESP32-CAM UDP Target", "Could not register this PC's IP with ESP32-CAM.\n"
                                                        "ESP32-CAM might send UDP packets to a wrong/old IP if it doesn't have a default.")
 
-    #Create and set placeholder image before starting threads
     placeholder_image_tk = create_placeholder_image(640, 480) 
-    if 'video_label' in globals() and video_label: # Ensure video_label is created
-        video_label.imgtk = placeholder_image_tk # Initialize this attribute
+    if 'video_label' in globals() and video_label: 
+        video_label.imgtk = placeholder_image_tk 
         video_label.configure(image=placeholder_image_tk) 
 
     if not load_yolo(): app.destroy(); exit()
