@@ -1,122 +1,114 @@
+// Arduino Uno Code
+// Uses Hardware Serial (Pins 0-RX, 1-TX) for communication with ESP32-CAM at 115200 baud.
+// Handles servo control (Pins 12, 13), buzzer (Pin 9), and DS1302 RTC (Pins 5,6,7).
+// Logs command reception times and inactivity.
+// Sends "LOG_START:<timestamp>" and "LOG_STOP:<timestamp>" messages to ESP32-CAM.
+// Internal debug messages from Arduino are minimized to avoid spamming ESP32-CAM.
+// Servos auto-center on boot.
+// PAN SERVO MOVEMENT IS INVERTED.
+
 #include <Servo.h>
-#include <ThreeWire.h>  
-#include <RtcDS1302.h>  
+#include <ThreeWire.h>      // Required by RtcDS1302 library
+#include <RtcDS1302.h>      // Library for DS1302 RTC
 
-//Pin Definitions
-//Servo Pins
-const int PAN_SERVO_PIN = 12;   //PWM pin for Pan Servo
-const int TILT_SERVO_PIN = 13;  //PWM pin for Tilt Servo
-// Buzzer Pin
-const int BUZZER_PIN = 9;       //Digital pin for Buzzer
-//DS1302 RTC Pins
-const int DS1302_RST_PIN = 5;   //CE/RST pin
-const int DS1302_DAT_PIN = 6;   //IO/DAT pin
-const int DS1302_CLK_PIN = 7;   //SCLK/CLK pin
+// --- Pin Definitions ---
+const int PAN_SERVO_PIN = 12;   
+const int TILT_SERVO_PIN = 13;  
+const int BUZZER_PIN = 9;       
+const int DS1302_RST_PIN = 5;   
+const int DS1302_DAT_PIN = 6;   
+const int DS1302_CLK_PIN = 7;   
 
-//Servo Objects
+// --- Servo Objects ---
 Servo panServo;
 Servo tiltServo;
 
-//RTC Object Setup
-//Initialize a ThreeWire interface for the RtcDS1302 library
+// --- RTC Object Setup ---
 ThreeWire myWire(DS1302_DAT_PIN, DS1302_CLK_PIN, DS1302_RST_PIN); 
-RtcDS1302<ThreeWire> Rtc(myWire); //Create an RtcDS1302 object
+RtcDS1302<ThreeWire> Rtc(myWire); 
 
-//Variables
-String inputString = "";         //A String to hold incoming data from ESP32-CAM
-boolean stringComplete = false;  //Whether the string is complete
-int panAngle = 90;               //Initial pan angle (center)
-int tiltAngle = 90;              //Initial tilt angle (center)
+// --- Variables ---
+String inputString = "";         
+boolean stringComplete = false;  
+int panAngle = 90; // Stores the *commanded* pan angle             
+int tiltAngle = 90; // Stores the *commanded* tilt angle             
 
-//Inactivity Timeout Logic
-unsigned long lastCommandTime = 0;       //Stores the millis() timestamp of the last command
-const unsigned long inactivityTimeout = 10000; //10 seconds in milliseconds
-boolean systemIsActive = false;          //Tracks if the system is currently considered active
+// --- Inactivity Timeout Logic ---
+unsigned long lastCommandTime = 0;       
+const unsigned long inactivityTimeout = 10000; 
+boolean systemIsActive = false;          
 
-//Setup Function: Runs once when the Arduino starts ---
+// --- Setup Function: Runs once when the Arduino starts ---
 void setup() {
-  Serial.begin(115200); //For communication with ESP32-CAM AND for Arduino's debug prints
+  Serial.begin(115200); 
   inputString.reserve(30); 
 
   panServo.attach(PAN_SERVO_PIN);
   tiltServo.attach(TILT_SERVO_PIN);
-
-  // Initialize servos to the center position (as per your sketch)
-  panServo.write(panAngle);
-  tiltServo.write(tiltAngle);
+  
+  // Initialize servos to the center position (panAngle is 90, so inverted is also 90)
+  panServo.write(180 - panAngle); // Write the inverted angle for pan
+  tiltServo.write(tiltAngle);     // Tilt remains as is
+  // Serial.println("Arduino (USB Debug): Servos centered (pan inverted)."); 
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW); 
+  
+  // Serial.println("Arduino (USB Debug): Initializing DS1302 RTC..."); 
+  Rtc.Begin(); 
 
-  Serial.println("Arduino: Initializing DS1302 RTC..."); //Debug for Arduino's monitor
-  Rtc.Begin(); //Initialize the RTC
-
-  //Check if the RTC is write-protected (optional, but good to know for DS1302)
   if (Rtc.GetIsWriteProtected()) {
-    Serial.println("Arduino: RTC was write protected, enabling writing now.");
+    // Serial.println("Arduino (USB Debug): RTC was write protected, enabling writing."); 
     Rtc.SetIsWriteProtected(false);
   }
 
-  //Check if the RTC is running. If not, set the time.
   if (!Rtc.GetIsRunning()) {
-    Serial.println("Arduino: RTC was not actively running, starting now and setting time to compile time.");
-    //Use char arrays for __DATE__ and __TIME__ for RtcDateTime constructor
+    // Serial.println("Arduino (USB Debug): RTC not running, setting time to compile time."); 
     char currDate[] = __DATE__;
     char currTime[] = __TIME__;
     Rtc.SetDateTime(RtcDateTime(currDate, currTime));
-    Rtc.SetIsRunning(true); // Ensure the clock is running
+    Rtc.SetIsRunning(true); 
   }
-
-  // Optional: Force set time to compile time every boot (uncomment if needed)
-  // Serial.println("Arduino: Setting RTC to compile time...");
-  // char currDateForce[] = __DATE__;
-  // char currTimeForce[] = __TIME__;
-  // Rtc.SetDateTime(RtcDateTime(currDateForce, currTimeForce));
 
   RtcDateTime now = Rtc.GetDateTime();
-  if (now.Year() < 2024) { // Or some other reasonable year like 2023
-      Serial.println("Arduino: RTC time seems invalid (e.g., year < 2024). Consider re-setting time or checking battery.");
-      // You might want to force-set it again here if the time is clearly wrong
-      // char currDateInvalid[] = __DATE__;
-      // char currTimeInvalid[] = __TIME__;
-      // Rtc.SetDateTime(RtcDateTime(currDateInvalid, currTimeInvalid));
+  if (now.Year() < 2024) { 
+      // Serial.println("Arduino (USB Debug): RTC time seems invalid."); 
   }
 
-  Serial.print("Arduino: Current RTC Time: ");
-  printAndFormatDateTime(now, NULL); //Just print to Arduino Serial for local debug
-  Serial.println();
+  // Serial.print("Arduino (USB Debug): Current RTC Time: "); 
+  // printAndFormatDateTime(now, NULL); 
+  // Serial.println();
   
-  Serial.println("Arduino: Ready with DS1302. Waiting for commands from ESP32-CAM...");
+  Serial.println("Arduino: Setup Complete. Ready."); 
   lastCommandTime = millis(); 
   briefBeep(); 
 }
 
-//Loop Function
+// --- Loop Function: Runs repeatedly ---
 void loop() {
   if (stringComplete) {
     RtcDateTime commandTime = Rtc.GetDateTime(); 
 
     if (!systemIsActive) { 
-        Serial.print("Arduino: Activity RESUMED at "); 
-        printAndFormatDateTime(commandTime, NULL);
-        Serial.println();
+        // Serial.print("Arduino (USB Debug): Activity RESUMED at "); 
+        // printAndFormatDateTime(commandTime, NULL);
+        // Serial.println();
         
-        char formattedTime[25]; //Buffer for formatted time string
-        printAndFormatDateTime(commandTime, formattedTime);
-        Serial.print("LOG_START:"); //This goes to ESP32-CAM
-        Serial.println(formattedTime); //This goes to ESP32-CAM
+        char formattedTime[25];
+        printAndFormatDateTime(commandTime, formattedTime); 
+        Serial.print("LOG_START:"); 
+        Serial.println(formattedTime); 
         
         systemIsActive = true;
     }
     lastCommandTime = millis(); 
     
-    //Local debug of received command
-    Serial.print("Arduino: Command '");
     inputString.trim(); 
-    Serial.print(inputString); 
-    Serial.print("' received at ");
-    printAndFormatDateTime(commandTime, NULL); //Print time for this specific command
-    Serial.println();
+    // Serial.print("Arduino (Serial RX): Received '");
+    // Serial.print(inputString); 
+    // Serial.print("' at ");
+    // printAndFormatDateTime(commandTime, NULL);
+    // Serial.println();
     
     processCommand(inputString); 
     inputString = "";            
@@ -125,20 +117,20 @@ void loop() {
 
   if (systemIsActive && (millis() - lastCommandTime > inactivityTimeout)) {
     RtcDateTime stopTime = Rtc.GetDateTime();
-    Serial.print("Arduino: Activity STOPPED at "); 
-    printAndFormatDateTime(stopTime, NULL);
-    Serial.println();
+    // Serial.print("Arduino (USB Debug): Activity STOPPED at "); 
+    // printAndFormatDateTime(stopTime, NULL);
+    // Serial.println();
 
     char formattedTime[25];
-    printAndFormatDateTime(stopTime, formattedTime);
-    Serial.print("LOG_STOP:"); //This goes to ESP32-CAM
-    Serial.println(formattedTime); //This goes to ESP32-CAM
+    printAndFormatDateTime(stopTime, formattedTime); 
+    Serial.print("LOG_STOP:"); 
+    Serial.println(formattedTime); 
         
     systemIsActive = false; 
   }
 }
 
-//Serial Event
+// --- Serial Event: Called automatically when data is available on Hardware Serial port ---
 void serialEvent() {
   while (Serial.available()) {
     char inChar = (char)Serial.read(); 
@@ -149,51 +141,61 @@ void serialEvent() {
   }
 }
 
-//Process Incoming Command
+// --- Process Incoming Command from ESP32-CAM ---
 void processCommand(String cmd) {
-  // cmd is already trimmed by the caller (in loop)
+  // cmd is already trimmed
   if (cmd.startsWith("S")) { 
     int colonIndex = cmd.indexOf(':'); 
     if (colonIndex > 0) {
       String panStr = cmd.substring(1, colonIndex);
       String tiltStr = cmd.substring(colonIndex + 1);
-      int newPan = panStr.toInt();
-      int newTilt = tiltStr.toInt();
-      newPan = constrain(newPan, 0, 180);
-      newTilt = constrain(newTilt, 0, 180); 
+      int newPanCmd = panStr.toInt(); // Commanded pan angle
+      int newTiltCmd = tiltStr.toInt(); // Commanded tilt angle
 
-      panAngle = newPan;
-      tiltAngle = newTilt;
-      panServo.write(panAngle);   
-      tiltServo.write(tiltAngle); 
+      newPanCmd = constrain(newPanCmd, 0, 180);
+      newTiltCmd = constrain(newTiltCmd, 0, 180); 
 
-      Serial.print("Arduino: Moved to Pan: "); Serial.print(panAngle); 
-      Serial.print(", Tilt: "); Serial.println(tiltAngle);            
+      // Invert the pan angle
+      int actualPanToWrite = 180 - newPanCmd; 
+      // Ensure the inverted angle is also within servo limits (it should be if original is)
+      actualPanToWrite = constrain(actualPanToWrite, 0, 180);
+
+      // Store the original commanded angles for state tracking if needed,
+      // but write the possibly inverted angle to the servo.
+      panAngle = newPanCmd; // Store the logical angle
+      tiltAngle = newTiltCmd;
+
+      panServo.write(actualPanToWrite); // Write the INVERTED pan angle
+      tiltServo.write(newTiltCmd);      // Write the tilt angle as is
+
+      // Serial.print("Arduino: Commanded Pan: "); Serial.print(newPanCmd); // Debug original command
+      // Serial.print(" -> Writing to Servo: "); Serial.print(actualPanToWrite); // Debug inverted value
+      // Serial.print(", Tilt: "); Serial.println(newTiltCmd);            
     } else {
-      Serial.println("Arduino: Invalid servo command format received."); 
+      // Serial.println("Arduino: Invalid servo command format received."); 
     }
   } else {
-    Serial.print("Arduino: Received non-servo command or echo: "); Serial.println(cmd); 
+    // Serial.print("Arduino (Serial RX): Received non-servo command or unhandled: "); Serial.println(cmd); 
   }
 }
 
-//Buzzer Control
+// --- Buzzer Control ---
 void briefBeep() {
   digitalWrite(BUZZER_PIN, HIGH); delay(50); digitalWrite(BUZZER_PIN, LOW);  
 }
 
-//Helper function to print and optionally format date/time
+// --- Helper function to print and optionally format date/time ---
 void printAndFormatDateTime(const RtcDateTime& dt, char* buffer) {
     char tempBuffer[25]; 
     snprintf_P(tempBuffer, 
             countof(tempBuffer),
-            PSTR("%02u/%02u/%04u,%02u:%02u:%02u"), //CSV friendly: Date,Time
+            PSTR("%02u/%02u/%04u,%02u:%02u:%02u"), 
             dt.Day(), dt.Month(), dt.Year(),
             dt.Hour(), dt.Minute(), dt.Second() );
     
     if (buffer != NULL) {
-        strcpy(buffer, tempBuffer);
+        strcpy(buffer, tempBuffer); 
     } else {
-        Serial.print(tempBuffer); //For Arduino's local debugging
+        // Serial.print(tempBuffer); 
     }
 }
