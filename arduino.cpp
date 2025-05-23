@@ -11,7 +11,7 @@
 #include <ThreeWire.h>      // Required by RtcDS1302 library
 #include <RtcDS1302.h>      // Library for DS1302 RTC
 
-//Pin Definitions
+// --- Pin Definitions ---
 const int PAN_SERVO_PIN = 12;   
 const int TILT_SERVO_PIN = 13;  
 const int BUZZER_PIN = 9;       
@@ -19,26 +19,26 @@ const int DS1302_RST_PIN = 5;
 const int DS1302_DAT_PIN = 6;   
 const int DS1302_CLK_PIN = 7;   
 
-//Servo Objects
+// --- Servo Objects ---
 Servo panServo;
 Servo tiltServo;
 
-//RTC Object Setup
+// --- RTC Object Setup ---
 ThreeWire myWire(DS1302_DAT_PIN, DS1302_CLK_PIN, DS1302_RST_PIN); 
 RtcDS1302<ThreeWire> Rtc(myWire); 
 
-//Variables
+// --- Variables ---
 String inputString = "";         
 boolean stringComplete = false;  
-int panAngle = 90;         
-int tiltAngle = 90;      
+int panAngle = 90; // Stores the *commanded* pan angle             
+int tiltAngle = 90; // Stores the *commanded* tilt angle             
 
-//Inactivity Timeout Logic
+// --- Inactivity Timeout Logic ---
 unsigned long lastCommandTime = 0;       
 const unsigned long inactivityTimeout = 10000; 
 boolean systemIsActive = false;          
 
-//Setup Function: Runs once when the Arduino starts
+// --- Setup Function: Runs once when the Arduino starts ---
 void setup() {
   Serial.begin(115200); 
   inputString.reserve(30); 
@@ -46,9 +46,9 @@ void setup() {
   panServo.attach(PAN_SERVO_PIN);
   tiltServo.attach(TILT_SERVO_PIN);
   
- 
-  panServo.write(180 - panAngle); 
-  tiltServo.write(tiltAngle);     
+  // Initialize servos to the center position (panAngle is 90, so inverted is also 90)
+  panServo.write(180 - panAngle); // Write the inverted angle for pan
+  tiltServo.write(tiltAngle);     // Tilt remains as is
   // Serial.println("Arduino (USB Debug): Servos centered (pan inverted)."); 
 
   pinMode(BUZZER_PIN, OUTPUT);
@@ -84,7 +84,7 @@ void setup() {
   briefBeep(); 
 }
 
-//Loop Function: Runs repeatedly
+// --- Loop Function: Runs repeatedly ---
 void loop() {
   if (stringComplete) {
     RtcDateTime commandTime = Rtc.GetDateTime(); 
@@ -130,7 +130,7 @@ void loop() {
   }
 }
 
-//Serial Event: Called automatically
+// --- Serial Event: Called automatically when data is available on Hardware Serial port ---
 void serialEvent() {
   while (Serial.available()) {
     char inChar = (char)Serial.read(); 
@@ -141,32 +141,32 @@ void serialEvent() {
   }
 }
 
-//Process Incoming Command from ESP32-CAM
+// --- Process Incoming Command from ESP32-CAM ---
 void processCommand(String cmd) {
-  //cmd is already trimmed
+  // cmd is already trimmed
   if (cmd.startsWith("S")) { 
     int colonIndex = cmd.indexOf(':'); 
     if (colonIndex > 0) {
       String panStr = cmd.substring(1, colonIndex);
       String tiltStr = cmd.substring(colonIndex + 1);
-      int newPanCmd = panStr.toInt(); //Commanded pan angle
-      int newTiltCmd = tiltStr.toInt(); //Commanded tilt angle
+      int newPanCmd = panStr.toInt(); // Commanded pan angle
+      int newTiltCmd = tiltStr.toInt(); // Commanded tilt angle
 
       newPanCmd = constrain(newPanCmd, 0, 180);
       newTiltCmd = constrain(newTiltCmd, 0, 180); 
 
-      //Invert the pan angle
+      // Invert the pan angle
       int actualPanToWrite = 180 - newPanCmd; 
-      //Ensure the inverted angle is also within servo limits (it should be if original is)
+      // Ensure the inverted angle is also within servo limits (it should be if original is)
       actualPanToWrite = constrain(actualPanToWrite, 0, 180);
 
-      //Store the original commanded angles for state tracking if needed,
-      //but write the possibly inverted angle to the servo.
-      panAngle = newPanCmd; //Store the logical angle
+      // Store the original commanded angles for state tracking if needed,
+      // but write the possibly inverted angle to the servo.
+      panAngle = newPanCmd; // Store the logical angle
       tiltAngle = newTiltCmd;
 
-      panServo.write(actualPanToWrite); //Write the INVERTED pan angle
-      tiltServo.write(newTiltCmd);      //Write the tilt angle as is
+      panServo.write(actualPanToWrite); // Write the INVERTED pan angle
+      tiltServo.write(newTiltCmd);      // Write the tilt angle as is
 
       // Serial.print("Arduino: Commanded Pan: "); Serial.print(newPanCmd); // Debug original command
       // Serial.print(" -> Writing to Servo: "); Serial.print(actualPanToWrite); // Debug inverted value
@@ -179,12 +179,12 @@ void processCommand(String cmd) {
   }
 }
 
-//Buzzer Control
+// --- Buzzer Control ---
 void briefBeep() {
   digitalWrite(BUZZER_PIN, HIGH); delay(50); digitalWrite(BUZZER_PIN, LOW);  
 }
 
-//Helper function to print and optionally format date/time
+// --- Helper function to print and optionally format date/time ---
 void printAndFormatDateTime(const RtcDateTime& dt, char* buffer) {
     char tempBuffer[25]; 
     snprintf_P(tempBuffer, 

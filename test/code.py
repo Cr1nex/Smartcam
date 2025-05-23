@@ -16,21 +16,12 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from zeroconf import ServiceBrowser, Zeroconf, ServiceInfo 
-
+from dotenv import load_dotenv
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad 
 import base64
 
-from dotenv import load_dotenv 
-
-#Load Environment Variables
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
-if os.path.exists(dotenv_path):
-    print(f"Python: Loading environment variables from {dotenv_path}")
-    load_dotenv(dotenv_path=dotenv_path)
-else:
-    print(f"Python: .env file not found at {dotenv_path}. AES keys will not be loaded from .env.")
-
+load_dotenv()
 
 #Configuration
 ESP32_CAM_IP_ADDRESS = None 
@@ -38,23 +29,19 @@ ESP32_COMMAND_URL_BASE = None
 
 MDNS_SERVICE_TYPE = "_http._tcp.local."
 MDNS_SERVICE_NAME = "esp32-cam-tracker._http._tcp.local." 
-DISCOVERY_TIMEOUT = 5 
-
-#Encryption Configuration (Loaded from .env)
+DISCOVERY_TIMEOUT = 10
+#Encryption Configuration
 AES_KEY = None
 AES_IV = None
 AES_BLOCK_SIZE = 16 
 
 def load_encryption_config():
     global AES_KEY, AES_IV
-    print("Python: Attempting to load encryption configuration...")
     key_str = os.getenv("AES_KEY_BYTES")
     iv_str = os.getenv("AES_IV_BYTES")
 
     if not key_str or not iv_str:
-        error_msg = "AES_KEY_BYTES or AES_IV_BYTES not found in .env file or are empty!\nPlease create/check .env with these values (comma-separated decimal bytes)."
-        print(f"Python: ERROR - {error_msg}")
-        messagebox.showerror("Encryption Config Error", error_msg)
+        messagebox.showerror("Encryption Error", "AES_KEY_BYTES or AES_IV_BYTES not found in .env file!\nPlease create a .env file with these values (comma-separated decimal bytes).")
         return False
     
     try:
@@ -62,48 +49,34 @@ def load_encryption_config():
         AES_IV = bytes([int(b.strip()) for b in iv_str.split(',')])
 
         if len(AES_KEY) != 16:
-            error_msg = f"AES_KEY from .env file must be 16 bytes long, found {len(AES_KEY)} bytes."
-            print(f"Python: ERROR - {error_msg}")
-            messagebox.showerror("Encryption Config Error", error_msg)
+            messagebox.showerror("Encryption Error", f"AES_KEY from .env file must be 16 bytes long, found {len(AES_KEY)} bytes.")
             AES_KEY = None 
             return False
         if len(AES_IV) != 16:
-            error_msg = f"AES_IV from .env file must be 16 bytes long, found {len(AES_IV)} bytes."
-            print(f"Python: ERROR - {error_msg}")
-            messagebox.showerror("Encryption Config Error", error_msg)
-            AES_IV = None 
+            messagebox.showerror("Encryption Error", f"AES_IV from .env file must be 16 bytes long, found {len(AES_IV)} bytes.")
+            AES_IV = None
             return False
         
-        print("Python: AES Key and IV loaded and validated successfully from .env file.")
+        print("Python: AES Key and IV loaded successfully from .env file.")
         return True
     except Exception as e:
-        error_msg = f"Error parsing AES_KEY_BYTES or AES_IV_BYTES from .env file: {e}\nEnsure they are comma-separated decimal byte values."
-        print(f"Python: ERROR - {error_msg}")
-        messagebox.showerror("Encryption Config Error", error_msg)
-        AES_KEY = None 
+        messagebox.showerror("Encryption Error", f"Error parsing AES_KEY_BYTES or AES_IV_BYTES from .env file: {e}\nEnsure they are comma-separated decimal byte values.")
+        AES_KEY = None
         AES_IV = None
         return False
-
-#UDP Video Configuration
 UDP_VIDEO_IP_ADDRESS = "0.0.0.0"  
 UDP_VIDEO_PORT = 12345            
 UDP_VIDEO_BUFFER_SIZE = 65507     
 START_OF_FRAME_MARKER = b"<SOF>"
 END_OF_FRAME_MARKER = b"<EOF>"
 
-#UDP Log Configuration
 UDP_LOG_IP_ADDRESS = "0.0.0.0"
 UDP_LOG_PORT = 12346 
 UDP_LOG_BUFFER_SIZE = 256 
 
-#YOLO Configuration (Updated for YOLOv4-tiny)
-YOLO_CONFIG_PATH = "yolov4-tiny.cfg" 
-YOLO_WEIGHTS_PATH = "yolov4-tiny.weights" 
-YOLO_CLASSES_PATH = "coco.names" 
-YOLO_INPUT_WIDTH = 416  
-YOLO_INPUT_HEIGHT = 416 
-YOLO_CONFIDENCE_THRESHOLD = 0.4 
-YOLO_NMS_THRESHOLD = 0.3       
+YOLO_CONFIG_PATH = "yolov3-tiny.cfg"
+YOLO_WEIGHTS_PATH = "yolov3-tiny.weights"
+YOLO_CLASSES_PATH = "coco.names"
 
 #Global Variables
 yolo_net = None; output_layers = None; classes = []
@@ -111,15 +84,14 @@ current_pan = 90; current_tilt = 90
 auto_tracking_enabled = False
 stop_threads = False 
 last_command_time = 0 
-COMMAND_SEND_INTERVAL = 0.15 
+COMMAND_SEND_INTERVAL = 0.75 # Kept at 0.75s from previous adjustment
 
 udp_video_socket = None
 video_frame_buffer = bytearray()
 receiving_video_frame = False
 last_valid_frame_time = 0 
-NO_SIGNAL_TIMEOUT = 3.0 
+NO_SIGNAL_TIMEOUT = 5.0 
 decode_error_count = 0 
-max_decode_errors_before_placeholder = 5 
 
 udp_log_socket = None
 activity_log_entries = [] 
@@ -128,7 +100,7 @@ recipient_email_entry = None
 placeholder_image_tk = None 
 
 #Placeholder Image Creation
-def create_placeholder_image(width, height, text="Waiting for Video Signal..."): 
+def create_placeholder_image(width, height, text="Waiting for Video Signal..."):
     global placeholder_image_tk 
     try:
         img = Image.new('RGB', (width, height), color = (70, 70, 70)) 
@@ -147,11 +119,11 @@ def create_placeholder_image(width, height, text="Waiting for Video Signal..."):
         placeholder_image_tk = ImageTk.PhotoImage(image=img)
         return placeholder_image_tk
 
-
 #Encryption Function
 def encrypt_command(plaintext_command_str):
     if AES_KEY is None or AES_IV is None:
         print("Python: AES Key/IV not loaded properly from .env. Cannot encrypt command.")
+        # messagebox.showerror("Encryption Error", "AES Key/IV not loaded. Cannot send commands.") # Avoid rapid popups
         return None
     try:
         cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
@@ -220,34 +192,19 @@ def register_python_client_with_esp32():
         messagebox.showerror("ESP32-CAM Registration Error", f"Error registering with ESP32-CAM:\n{e}")
         return False
 
-#YOLO Initialization
+#YOLOv3-tiny Initialization
 def load_yolo(): 
     global yolo_net, output_layers, classes
     try:
-        print(f"Python: Loading YOLO model: Weights='{YOLO_WEIGHTS_PATH}', Config='{YOLO_CONFIG_PATH}'")
         yolo_net = cv2.dnn.readNet(YOLO_WEIGHTS_PATH, YOLO_CONFIG_PATH)
-        if cv2.cuda.getCudaEnabledDeviceCount() > 0: 
-            yolo_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-            yolo_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-            print("YOLO: Using CUDA backend.")
-        else: 
-            print("YOLO: Using CPU backend.")
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0: yolo_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA); yolo_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA); print("YOLO: Using CUDA backend.")
+        else: print("YOLO: Using CPU backend.")
         layer_names = yolo_net.getLayerNames()
         try: output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers().flatten()]
         except AttributeError: output_layers = [layer_names[i[0] - 1] for i in yolo_net.getUnconnectedOutLayers()]
         with open(YOLO_CLASSES_PATH, "r") as f: classes = [line.strip() for line in f.readlines()]
         print("YOLO model loaded successfully."); return True
-    except cv2.error as e: 
-        error_detail = f"Failed to load YOLO model files.\n\nWeights: {os.path.abspath(YOLO_WEIGHTS_PATH)}\nConfig: {os.path.abspath(YOLO_CONFIG_PATH)}\nClasses: {os.path.abspath(YOLO_CLASSES_PATH)}\n\nError: {e}\n\nPlease ensure these files exist at the specified paths and are valid."
-        print(f"Python: ERROR - {error_detail}")
-        messagebox.showerror("YOLO Load Error", error_detail)
-        return False
-    except Exception as e: 
-        error_detail = f"An unexpected error occurred while loading YOLO model files.\nError: {e}"
-        print(f"Python: ERROR - {error_detail}")
-        messagebox.showerror("YOLO Load Error", error_detail)
-        return False
-
+    except Exception as e: messagebox.showerror("YOLO Load Error", f"Failed to load YOLO: {e}"); return False
 
 #Servo Control Communication (TCP/HTTP)
 def send_pan_tilt_command(pan, tilt): 
@@ -258,14 +215,14 @@ def send_pan_tilt_command(pan, tilt):
     pan = int(np.clip(pan, 0, 180)); tilt = int(np.clip(tilt, 30, 150)) 
     plaintext_command = f"S{pan}:{tilt}" 
     encrypted_command_b64 = encrypt_command(plaintext_command)
-    if encrypted_command_b64 is None: print("Python: Command encryption failed. Command not sent."); return False
+    if encrypted_command_b64 is None: print("Python: Command encryption failed. Command not sent."); return False # Added more info
     actual_command_url = f"{ESP32_COMMAND_URL_BASE}/command"
     response_obj = None 
     try:
         headers = {'Content-Type': 'text/plain'} 
-        # print(f"Python: Sending to {actual_command_url}, Data (Encrypted B64): {encrypted_command_b64[:20]}...") 
+        print(f"Python: Sending to {actual_command_url}, Data (Encrypted B64): {encrypted_command_b64[:20]}...") 
         response_obj = requests.post(actual_command_url, data=encrypted_command_b64, headers=headers, timeout=2.0) 
-        # print(f"Python: HTTP Status: {response_obj.status_code}, ESP Response: '{response_obj.text}' for command {plaintext_command}")
+        print(f"Python: HTTP Status: {response_obj.status_code}, ESP Response: '{response_obj.text}' for command {plaintext_command}")
         response_obj.raise_for_status() 
         current_pan = pan; current_tilt = tilt
         update_angle_labels(); last_command_time = current_time 
@@ -279,37 +236,29 @@ def send_pan_tilt_command(pan, tilt):
     last_command_time = current_time 
     return False
 
-#Video Processing and Object Detection
+#Video Processing and Object Detection (YOLO)
 def process_frame_yolo(frame_input): 
     global current_pan, current_tilt, auto_tracking_enabled
     if frame_input is None or yolo_net is None: return frame_input 
     frame = frame_input.copy(); height, width, _ = frame.shape
     frame_center_x, frame_center_y = width // 2, height // 2
-    
-    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (YOLO_INPUT_WIDTH, YOLO_INPUT_HEIGHT), swapRB=True, crop=False)
+    blob = cv2.dnn.blobFromImage(frame, 1/255.0, (320,320), swapRB=True, crop=False)
     yolo_net.setInput(blob)
     try: outs = yolo_net.forward(output_layers)
     except Exception as e: print(f"Python: YOLO error: {e}"); return frame_input
-    
     class_ids_detected, confidences_detected, boxes_detected = [], [], []
     TRACK_TARGET_CLASS = "person"; best_target_box = None; largest_target_area = 0
-    
     for out in outs:
         for detection in out:
             scores = detection[5:]; class_id = np.argmax(scores); confidence = scores[class_id]
-            if confidence > YOLO_CONFIDENCE_THRESHOLD: 
-                center_x_frame = int(detection[0] * width); center_y_frame = int(detection[1] * height)
-                w_frame = int(detection[2] * width); h_frame = int(detection[3] * height)
-                x_frame = int(center_x_frame - w_frame / 2); y_frame = int(center_y_frame - h_frame / 2)
-                boxes_detected.append([x_frame, y_frame, w_frame, h_frame])
-                confidences_detected.append(float(confidence)); class_ids_detected.append(class_id)
+            if confidence > 0.4: 
+                cx, cy = int(detection[0]*width), int(detection[1]*height); w, h = int(detection[2]*width), int(detection[3]*height)
+                x, y = int(cx - w/2), int(cy - h/2)
+                boxes_detected.append([x,y,w,h]); confidences_detected.append(float(confidence)); class_ids_detected.append(class_id)
                 if classes[class_id] == TRACK_TARGET_CLASS:
-                    current_area = w_frame * h_frame 
-                    if current_area > largest_target_area: 
-                        largest_target_area=current_area; best_target_box=(center_x_frame,center_y_frame,w_frame,h_frame) 
-    
-    indexes = cv2.dnn.NMSBoxes(boxes_detected, confidences_detected, YOLO_CONFIDENCE_THRESHOLD - 0.05, YOLO_NMS_THRESHOLD) 
-    
+                    area = w*h
+                    if area > largest_target_area: largest_target_area=area; best_target_box=(cx,cy,w,h)
+    indexes = cv2.dnn.NMSBoxes(boxes_detected, confidences_detected, 0.4, 0.3) 
     if indexes is not None and len(indexes) > 0:
         for i in indexes.flatten():
             label = str(classes[class_ids_detected[i]])
@@ -317,13 +266,12 @@ def process_frame_yolo(frame_input):
                 x,y,w,h = boxes_detected[i]; conf_score = confidences_detected[i]
                 cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
                 cv2.putText(frame, f"{label} {conf_score:.2f}", (x,y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0),2)
-    
     if auto_tracking_enabled and best_target_box:
         tcx, tcy, _, _ = best_target_box
         ex, ey = tcx - frame_center_x, tcy - frame_center_y
-        gP, gT, dZ = 0.04, 0.04, 25; dP, dT = 0,0 
+        gP, gT, dZ = 0.04, -0.04, 25; dP, dT = 0,0 
         if abs(ex)>dZ: dP = gP*ex
-        if abs(ey)>dZ: dT = gT*ey 
+        if abs(ey)>dZ: dT = gT*ey
         dP = np.clip(dP, -2,2); dT = np.clip(dT, -2,2) 
         if abs(dP)>0.2 or abs(dT)>0.2: send_pan_tilt_command(current_pan+dP, current_tilt+dT)
         cv2.circle(frame, (int(tcx), int(tcy)), 7, (0,0,255), -1) 
@@ -335,8 +283,6 @@ def process_frame_yolo(frame_input):
 def udp_video_receiver_thread(): 
     global stop_threads, udp_socket, video_frame_buffer, receiving_video_frame, last_valid_frame_time, decode_error_count, placeholder_image_tk, ESP32_COMMAND_URL_BASE
     
-    is_placeholder_currently_shown = False #Thread-local flag
-
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         udp_socket.bind((UDP_VIDEO_IP_ADDRESS, UDP_VIDEO_PORT))
@@ -359,10 +305,8 @@ def udp_video_receiver_thread():
         messagebox.showwarning("ESP32 Comms", "ESP32 IP not set.\nVideo stream might not start if ESP32 IP was not registered.")
 
     frame_width_display, frame_height_display = 640, 480
-    #Ensure placeholder_image_tk is created
-    current_placeholder = placeholder_image_tk 
-    if current_placeholder is None: 
-        current_placeholder = create_placeholder_image(frame_width_display, frame_height_display)
+    if placeholder_image_tk is None: 
+        placeholder_image_tk = create_placeholder_image(frame_width_display, frame_height_display)
     
     last_valid_frame_time = time.time() 
 
@@ -387,15 +331,10 @@ def udp_video_receiver_thread():
                             img_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
                             img_pil = Image.fromarray(img_rgb)
                             img_tk = ImageTk.PhotoImage(image=img_pil)
-                            
-                            if video_label.winfo_exists(): #Check if widget still exists
-                                video_label.imgtk = img_tk 
-                                video_label.configure(image=img_tk)
-                                is_placeholder_currently_shown = False #Valid frame is shown
+                            video_label.imgtk = img_tk 
+                            video_label.configure(image=img_tk)
                         else: 
                             decode_error_count += 1
-                            if decode_error_count % 10 == 0: 
-                                print(f"Python: UDP Video - cv2.imdecode returned None (Error count: {decode_error_count})")
                     except Exception as e: 
                         decode_error_count += 1
                         print(f"Python: UDP Video - Error processing frame: {e}")
@@ -412,15 +351,20 @@ def udp_video_receiver_thread():
                 receiving_video_frame = False 
             
             if time.time() - last_valid_frame_time > NO_SIGNAL_TIMEOUT:
-                if not is_placeholder_currently_shown: # Only update if not already showing
-                    if 'video_label' in globals() and video_label.winfo_exists():
+                if 'video_label' in globals() and video_label.winfo_exists():
+                    is_placeholder_set = False
+                    try:
+                        if hasattr(video_label, 'imgtk') and video_label.imgtk == placeholder_image_tk:
+                            is_placeholder_set = True
+                    except tk.TclError: 
+                        pass
+                    
+                    if not is_placeholder_set:
                         print(f"Python: No valid video signal for {NO_SIGNAL_TIMEOUT}s. Displaying placeholder.")
-                        # Use the globally set placeholder_image_tk
                         if placeholder_image_tk is None: 
                              placeholder_image_tk = create_placeholder_image(frame_width_display,frame_height_display)
                         video_label.imgtk = placeholder_image_tk 
                         video_label.configure(image=placeholder_image_tk)
-                        is_placeholder_currently_shown = True
             continue 
         except Exception as e:
             if not stop_threads: print(f"Python: UDP Video Receiver Error: {e}"); time.sleep(0.05) 
@@ -570,12 +514,13 @@ app.bind('t', lambda e: toggle_auto_tracking()); app.bind('T', lambda e: toggle_
 
 #Start Application
 if __name__ == "__main__":
-
+    # CRITICAL: Load encryption configuration AT THE VERY START
     if not load_encryption_config():
-        try:
-            if app and app.winfo_exists(): app.destroy()
-        except (tk.TclError, NameError): pass
-        print("Python: Exiting due to encryption configuration error.")
+        # load_encryption_config() already shows a messagebox on error
+        if app and app.winfo_exists(): # Check if app object was created for messagebox parent
+            app.destroy()
+        else: # If app not created, print to console and exit
+            print("Python: Exiting due to encryption configuration error.")
         exit()
 
     if not discover_esp32_cam_ip():
