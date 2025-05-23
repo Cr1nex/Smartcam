@@ -1,17 +1,8 @@
-// Arduino Uno Code
-// Uses Hardware Serial (Pins 0-RX, 1-TX) for communication with ESP32-CAM at 115200 baud.
-// Handles servo control (Pins 12, 13), buzzer (Pin 9), and DS1302 RTC (Pins 5,6,7).
-// Logs command reception times and inactivity.
-// Sends "LOG_START:<timestamp>" and "LOG_STOP:<timestamp>" messages to ESP32-CAM.
-// Internal debug messages from Arduino are minimized to avoid spamming ESP32-CAM.
-// Servos auto-center on boot.
-// PAN SERVO MOVEMENT IS INVERTED.
-
 #include <Servo.h>
-#include <ThreeWire.h>      // Required by RtcDS1302 library
-#include <RtcDS1302.h>      // Library for DS1302 RTC
+#include <ThreeWire.h>      
+#include <RtcDS1302.h>     
 
-// --- Pin Definitions ---
+//Pin Definitions
 const int PAN_SERVO_PIN = 12;   
 const int TILT_SERVO_PIN = 13;  
 const int BUZZER_PIN = 9;       
@@ -19,26 +10,26 @@ const int DS1302_RST_PIN = 5;
 const int DS1302_DAT_PIN = 6;   
 const int DS1302_CLK_PIN = 7;   
 
-// --- Servo Objects ---
+//Servo Objects
 Servo panServo;
 Servo tiltServo;
 
-// --- RTC Object Setup ---
+//RTC Object Setup
 ThreeWire myWire(DS1302_DAT_PIN, DS1302_CLK_PIN, DS1302_RST_PIN); 
 RtcDS1302<ThreeWire> Rtc(myWire); 
 
-// --- Variables ---
+//Variables
 String inputString = "";         
 boolean stringComplete = false;  
 int panAngle = 90; // Stores the *commanded* pan angle             
 int tiltAngle = 90; // Stores the *commanded* tilt angle             
 
-// --- Inactivity Timeout Logic ---
+//Inactivity Timeout Logic
 unsigned long lastCommandTime = 0;       
 const unsigned long inactivityTimeout = 10000; 
 boolean systemIsActive = false;          
 
-// --- Setup Function: Runs once when the Arduino starts ---
+//Setup Function: Runs once when the Arduino starts
 void setup() {
   Serial.begin(115200); 
   inputString.reserve(30); 
@@ -84,7 +75,7 @@ void setup() {
   briefBeep(); 
 }
 
-// --- Loop Function: Runs repeatedly ---
+//Loop Function: Runs repeatedly
 void loop() {
   if (stringComplete) {
     RtcDateTime commandTime = Rtc.GetDateTime(); 
@@ -130,7 +121,7 @@ void loop() {
   }
 }
 
-// --- Serial Event: Called automatically when data is available on Hardware Serial port ---
+//Serial Event: Called automatically when data is available on Hardware Serial port
 void serialEvent() {
   while (Serial.available()) {
     char inChar = (char)Serial.read(); 
@@ -141,7 +132,7 @@ void serialEvent() {
   }
 }
 
-// --- Process Incoming Command from ESP32-CAM ---
+//Process Incoming Command from ESP32-CAM
 void processCommand(String cmd) {
   // cmd is already trimmed
   if (cmd.startsWith("S")) { 
@@ -179,12 +170,12 @@ void processCommand(String cmd) {
   }
 }
 
-// --- Buzzer Control ---
+//Buzzer Control
 void briefBeep() {
   digitalWrite(BUZZER_PIN, HIGH); delay(50); digitalWrite(BUZZER_PIN, LOW);  
 }
 
-// --- Helper function to print and optionally format date/time ---
+//Helper function to print and optionally format date/time
 void printAndFormatDateTime(const RtcDateTime& dt, char* buffer) {
     char tempBuffer[25]; 
     snprintf_P(tempBuffer, 
