@@ -9,11 +9,10 @@
 #include "mbedtls/base64.h" 
 
 //WiFi Configuration
-const char* WIFI_SSID = "1";         
-const char* WIFI_PASSWORD = "1"; 
+const char* WIFI_SSID = "S1ght";         
+const char* WIFI_PASSWORD = "armut1998x"; 
 
 //Encryption Configuration
-
 uint8_t aesKey[] = { 
   0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 
   0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C 
@@ -23,8 +22,7 @@ const uint8_t original_aesIV[]  = {
   0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
 };
 AESLib aesLib; 
-const int AES_EFFECTIVE_BLOCK_SIZE = 16; //AES block size is 16 bytes
-
+const int AES_EFFECTIVE_BLOCK_SIZE = 16; 
 
 //UDP Video Stream Configuration
 WiFiUDP videoUdp; 
@@ -39,9 +37,9 @@ bool pythonClientReadyForVideo = false;
 //UDP Log Forwarding Configuration
 WiFiUDP logUdp; 
 const int logUdpPort = 12346; 
+// #define DISABLE_UDP_LOG_FORWARDING 
 
-
-//Web Server for Pan/Tilt Commands (TCP/HTTP)
+//Web Server
 WebServer commandServer(8081); 
 
 //Camera Pin Definitions
@@ -67,6 +65,8 @@ WebServer commandServer(8081);
 #endif
 
 //Serial Communication with Arduino using PRIMARY Serial (UART0)
+// This 'Serial' object (UART0 on GPIO1 TX, GPIO3 RX) will be used for 
+// Arduino communication AND for ESP32-CAM's own USB debug output.
 HardwareSerial& ArduinoCommsSerial = Serial; 
 
 String arduinoLogBuffer = ""; 
@@ -76,38 +76,52 @@ void handleRoot();
 void handleCommand();
 void handlePing(); 
 void handleSignalVideoReady();
-void handleRegisterPythonClient(); // For Python to register its IP
+void handleRegisterPythonClient();
 
-//Function to decrypt data (AES-128 CBC with PKCS7 unpadding)
+//Function to decrypt data (AES-128 CBC PKCS7 unpadding)
 String decryptCommand(const String& base64Ciphertext) {
   if (base64Ciphertext.length() > 88) { 
-    ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Base64 input too long for decryption."); 
+    ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): B64 too long"); 
     return "";
   }
   unsigned char ciphertext_bytes[64]; size_t ciphertext_len = 0;
   int ret = mbedtls_base64_decode(ciphertext_bytes, sizeof(ciphertext_bytes), &ciphertext_len, 
                                   (const unsigned char*)base64Ciphertext.c_str(), base64Ciphertext.length());
-  if (ret != 0) { ArduinoCommsSerial.printf("ESP32-CAM (SharedSerial): Base64 decode failed! Error: %d\n", ret); return "";} 
+  if (ret != 0) { ArduinoCommsSerial.printf("ESP32-CAM (SharedSerial): B64 decode fail! Err: %d\n", ret); return "";} 
   if (ciphertext_len == 0 || ciphertext_len % AES_EFFECTIVE_BLOCK_SIZE != 0) { 
-    ArduinoCommsSerial.printf("ESP32-CAM (SharedSerial): Decoded ciphertext length (%d) is invalid.\n", ciphertext_len); return "";} 
+    ArduinoCommsSerial.printf("ESP32-CAM (SharedSerial): Cipher len invalid (%u)\n", ciphertext_len); return "";} 
   unsigned char decrypted_padded_bytes[64]; memset(decrypted_padded_bytes, 0, sizeof(decrypted_padded_bytes));
-  
-  uint8_t currentIV[16]; 
-  memcpy(currentIV, original_aesIV, 16);
-
+  uint8_t currentIV[16]; memcpy(currentIV, original_aesIV, 16);
   uint16_t decrypted_padded_len = aesLib.decrypt(ciphertext_bytes, (uint16_t)ciphertext_len, 
                                                  decrypted_padded_bytes, aesKey, sizeof(aesKey) * 8, currentIV); 
-
-  if (decrypted_padded_len == 0) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): AES Decryption failed!"); return "";} 
-  if (decrypted_padded_len > ciphertext_len) { ArduinoCommsSerial.printf("ESP32-CAM (SharedSerial): AES Decryption error: out_len %d > in_len %d\n", decrypted_padded_len, ciphertext_len); return "";} 
+  if (decrypted_padded_len == 0) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): AES Decrypt fail"); return "";} 
+  if (decrypted_padded_len > ciphertext_len) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): AES Decrypt len error"); return "";} 
   int pad_val = (int)decrypted_padded_bytes[decrypted_padded_len - 1];
-  if (pad_val <= 0 || pad_val > AES_EFFECTIVE_BLOCK_SIZE) { ArduinoCommsSerial.printf("ESP32-CAM (SharedSerial): Invalid PKCS7 padding value: %d\n", pad_val); return ""; } 
-  for (int i = 0; i < pad_val; i++) { if ((int)decrypted_padded_bytes[decrypted_padded_len - 1 - i] != pad_val) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): PKCS7 padding verification failed."); return ""; }} 
+  if (pad_val <= 0 || pad_val > AES_EFFECTIVE_BLOCK_SIZE) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Invalid PKCS7 pad val"); return ""; } 
+  for (int i = 0; i < pad_val; i++) { if ((int)decrypted_padded_bytes[decrypted_padded_len - 1 - i] != pad_val) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): PKCS7 verify fail"); return ""; }} 
   int actual_data_len = decrypted_padded_len - pad_val;
-  if (actual_data_len < 0) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Error in unpadding."); return "";} 
+  if (actual_data_len < 0) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Unpad error"); return "";} 
   String result = ""; for(int i=0; i<actual_data_len; i++){ result += (char)decrypted_padded_bytes[i]; }
-  ArduinoCommsSerial.print("ESP32-CAM (SharedSerial): Decrypted command: '"); ArduinoCommsSerial.print(result); ArduinoCommsSerial.println("'"); 
+  ArduinoCommsSerial.print("ESP32-CAM (SharedSerial): Decrypted: '"); ArduinoCommsSerial.print(result); ArduinoCommsSerial.println("'"); 
   return result;
+}
+
+//WiFi Event Handler
+void WiFiEvent(WiFiEvent_t event) {
+    switch (event) {
+        case WIFI_EVENT_STA_START:
+            ArduinoCommsSerial.println("WiFi Station Started");
+            break;
+        case IP_EVENT_STA_GOT_IP:
+            ArduinoCommsSerial.print("WiFi GOT IP: ");
+            ArduinoCommsSerial.println(WiFi.localIP());
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            ArduinoCommsSerial.println("WiFi Disconnected from AP.");
+            break;
+        default:
+            break;
+    }
 }
 
 
@@ -119,38 +133,38 @@ void setup() {
 
   //WiFi Connection
   ArduinoCommsSerial.println("\n--- WiFi Connection ---"); 
+  WiFi.onEvent(WiFiEvent);
   WiFi.mode(WIFI_STA); delay(100);
-  ArduinoCommsSerial.print("Attempting WiFi connection to '"); ArduinoCommsSerial.print(WIFI_SSID); ArduinoCommsSerial.print("'");
+  ArduinoCommsSerial.print("Connecting to: "); ArduinoCommsSerial.println(WIFI_SSID); // Shorter
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD); 
   int connect_timeout = 30; 
   while (WiFi.status() != WL_CONNECTED && connect_timeout > 0) { delay(500); ArduinoCommsSerial.print("."); connect_timeout--;}
   ArduinoCommsSerial.println();
   if (WiFi.status() != WL_CONNECTED) {
-    ArduinoCommsSerial.println("Initial WiFi connection FAILED. Entering persistent retry mode...");
+    ArduinoCommsSerial.println("WiFi FAILED. Retrying...");
     while(WiFi.status() != WL_CONNECTED) { 
-        ArduinoCommsSerial.print("Retrying WiFi..."); delay(10000); 
-        WiFi.disconnect(); delay(100); WiFi.mode(WIFI_STA); delay(100);
+        ArduinoCommsSerial.print("R..."); delay(10000); WiFi.disconnect(true); delay(100); WiFi.mode(WIFI_STA); delay(100);
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-        int r_wait = 10; while(WiFi.status() != WL_CONNECTED && r_wait-- > 0) { delay(500); ArduinoCommsSerial.print(",");} ArduinoCommsSerial.println();
-        if(WiFi.status() != WL_CONNECTED) ArduinoCommsSerial.println("Retry failed."); else break;
+        int r_wait = 20; while(WiFi.status() != WL_CONNECTED && r_wait-- > 0) { delay(500); ArduinoCommsSerial.print(",");} ArduinoCommsSerial.println();
+        if(WiFi.status() != WL_CONNECTED) ArduinoCommsSerial.println("R Fail."); else break;
     }
   }
-  ArduinoCommsSerial.println(">>> WIFI SUCCESSFULLY CONNECTED! <<<");
-  ArduinoCommsSerial.print("IP Address: http://"); ArduinoCommsSerial.println(WiFi.localIP());
-  ArduinoCommsSerial.println("Waiting for Python client to register its IP via /register_python_client for UDP target.");
-
-
-  //mDNS Setup
-  ArduinoCommsSerial.println("Setting up mDNS responder...");
-  if (!MDNS.begin("esp32-cam-tracker")) { ArduinoCommsSerial.println("Error setting up MDNS responder!"); } 
-  else {
-    ArduinoCommsSerial.println("mDNS responder started: esp32-cam-tracker.local");
-    MDNS.addService("http", "tcp", 8081);
-    ArduinoCommsSerial.println("mDNS service added: _http._tcp.8081 for commands");
+  if (WiFi.status() == WL_CONNECTED) {
+    ArduinoCommsSerial.println(">>> WIFI CONNECTED! <<<");
+    ArduinoCommsSerial.print("IP: "); ArduinoCommsSerial.println(WiFi.localIP());
+    ArduinoCommsSerial.println("Waiting Python IP reg...");
+  } else {
+     ArduinoCommsSerial.println(">>> WIFI FINAL FAIL. Halting. <<<");
+     while(true) delay(10000);
   }
 
+  //mDNS Setup
+  ArduinoCommsSerial.println("mDNS init...");
+  if (!MDNS.begin("esp32-cam-tracker")) { ArduinoCommsSerial.println("mDNS fail!"); } 
+  else { MDNS.addService("http", "tcp", 8081); ArduinoCommsSerial.println("mDNS OK: esp32-cam-tracker.local");}
+
   //Camera Initialization
-  ArduinoCommsSerial.println("\n--- Camera Initialization ---");
+  ArduinoCommsSerial.println("--- Cam Init ---");
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0; config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM; config.pin_d1 = Y3_GPIO_NUM; config.pin_d2 = Y4_GPIO_NUM;
@@ -159,52 +173,44 @@ void setup() {
   config.pin_pclk = PCLK_GPIO_NUM; config.pin_vsync = VSYNC_GPIO_NUM; config.pin_href = HREF_GPIO_NUM;
   config.pin_sccb_sda = SIOD_GPIO_NUM; config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 12;      
-  config.fb_count = 2; 
+  config.xclk_freq_hz = 20000000; config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_VGA; config.jpeg_quality = 12; config.fb_count = 2; 
   esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) { ArduinoCommsSerial.printf("Camera init failed with error 0x%x. Rebooting...\n", err); delay(10000); ESP.restart(); return; }
-  ArduinoCommsSerial.println("Camera initialized successfully.");
+  if (err != ESP_OK) { ArduinoCommsSerial.printf("CamFail:0x%x\n", err); delay(10000); ESP.restart(); return; }
+  ArduinoCommsSerial.println("Cam OK.");
   sensor_t * s = esp_camera_sensor_get();
-  if (s == NULL) { ArduinoCommsSerial.println("!!! ERROR: Camera sensor not detected. Halting."); while(true) delay(10000); } 
-  else { ArduinoCommsSerial.println("Camera sensor detected successfully.");}
+  if (s == NULL) { ArduinoCommsSerial.println("SensorFail!"); while(true) delay(10000); } 
+  else { ArduinoCommsSerial.println("Sensor OK.");}
   delay(500); 
   
   //Setup TCP/HTTP Command Server
-  ArduinoCommsSerial.println("\n--- TCP/HTTP Command Server Setup (Port 8081) ---");
+  ArduinoCommsSerial.println("--- HTTP Server Init ---");
   commandServer.on("/", HTTP_GET, handleRoot); 
   commandServer.on("/command", HTTP_POST, handleCommand); 
   commandServer.on("/ping", HTTP_GET, handlePing); 
   commandServer.on("/signal_video_ready", HTTP_GET, handleSignalVideoReady); 
   commandServer.on("/register_python_client", HTTP_GET, handleRegisterPythonClient); 
   commandServer.begin();
-  ArduinoCommsSerial.println("TCP/HTTP Command Server started on port 8081.");
-  ArduinoCommsSerial.println("Waiting for Python client to signal ready for UDP video via /signal_video_ready endpoint...");
-  
-  ArduinoCommsSerial.println("\nSetup complete. Entering main loop...");
+  ArduinoCommsSerial.println("HTTP Server OK.");
+  ArduinoCommsSerial.println("Waiting VideoReady sig...");
+  ArduinoCommsSerial.println("Setup Done.");
+  ArduinoCommsSerial.flush();
 }
 
 unsigned long lastFrameTime = 0;
-const unsigned long frameInterval = 100;
+const unsigned long frameInterval = 100; 
 unsigned int udp_send_failures = 0;
 unsigned long lastStatsPrintTime = 0; 
-const unsigned long statsPrintInterval = 5000; //Print frame stats every 5 seconds
+const unsigned long statsPrintInterval = 10000; // Print frame stats only every 10 seconds
 
 void loop() {
-  // MDNS.update(); 
-
   if (WiFi.status() == WL_CONNECTED) {
     commandServer.handleClient(); 
-
     if (pythonClientIPLearned && pythonClientReadyForVideo && (millis() - lastFrameTime > frameInterval)) {
       unsigned long t_start_capture = millis();
       camera_fb_t * fb = esp_camera_fb_get();
       unsigned long t_end_capture = millis();
-
-      if (!fb) { /* wuuuuuuuu */ } 
-      else {
+      if (fb) {
         unsigned long t_start_send = millis();
         videoUdp.beginPacket(pythonClientIP, videoUdpPort); 
         videoUdp.write((const uint8_t*)START_OF_FRAME_MARKER, strlen(START_OF_FRAME_MARKER));
@@ -217,11 +223,10 @@ void loop() {
             videoUdp.write(fb->buf + bytesSent, chunkSize);
             if (videoUdp.endPacket()) { bytesSent += chunkSize; chunks++;} 
             else { 
-                ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): UDP video chunk send FAILED!"); 
-                udp_send_failures++; 
-                frame_send_success = false; 
-                delay(5); 
-                break; 
+                if (millis() - lastStatsPrintTime > statsPrintInterval) { 
+                    ArduinoCommsSerial.println("UDP VidChunkFail!"); 
+                }
+                udp_send_failures++; frame_send_success = false; delay(5); break; 
             }
         }
         if (frame_send_success && bytesSent == fb->len) { 
@@ -229,23 +234,22 @@ void loop() {
             videoUdp.write((const uint8_t*)END_OF_FRAME_MARKER, strlen(END_OF_FRAME_MARKER));
             videoUdp.endPacket();
         } else if (!frame_send_success) { 
-            ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Frame sending incomplete, not sending EOF.");
+            if (millis() - lastStatsPrintTime > statsPrintInterval) {
+                 ArduinoCommsSerial.println("FrameSendIncomplete-NoEOF");
+            }
         }
         unsigned long t_end_send = millis();
-        
         if (millis() - lastStatsPrintTime > statsPrintInterval) {
-            ArduinoCommsSerial.printf("Frame: %uB, %uchunks. Cap: %lums, Send: %lums. Total: %lums. UDP Fails: %u (Target: %s)\n", 
+            ArduinoCommsSerial.printf("F:%uB,%uc C:%lums S:%lums T:%lums NetF:%u PyIP:%s\n", 
                           fb->len, chunks, (t_end_capture - t_start_capture), (t_end_send - t_start_send), 
                           (t_end_send - t_start_capture), udp_send_failures, 
-                          (pythonClientIPLearned ? pythonClientIP.toString().c_str() : "?.?.?.?") );
+                          (pythonClientIPLearned ? pythonClientIP.toString().c_str() : "N/A") );
             lastStatsPrintTime = millis();
         }
         esp_camera_fb_return(fb); 
         lastFrameTime = millis();
       }
     }
-
-    //Check for and forward log messages from Arduino (received on PRIMARY Serial)
     #ifndef DISABLE_UDP_LOG_FORWARDING
     if (pythonClientIPLearned) { 
         while (ArduinoCommsSerial.available() > 0) { 
@@ -254,14 +258,16 @@ void loop() {
           if (receivedChar == '\n') {
             arduinoLogBuffer.trim(); 
             if (arduinoLogBuffer.startsWith("LOG_START:") || arduinoLogBuffer.startsWith("LOG_STOP:")) {
+              // ArduinoCommsSerial.print("ESP32 (SharedSerial RX): From Arduino: '"); // Avoid echo loop
+              // ArduinoCommsSerial.print(arduinoLogBuffer); ArduinoCommsSerial.println("'");
               logUdp.beginPacket(pythonClientIP, logUdpPort); 
               logUdp.print(arduinoLogBuffer); 
-              if(!logUdp.endPacket()){ ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): UDP log send failed!");}
+              if(!logUdp.endPacket()){ /* ArduinoCommsSerial.println("UDP LogSendFail"); */ } 
             } 
             arduinoLogBuffer = ""; 
           }
           if (arduinoLogBuffer.length() > 60) { 
-              // ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Arduino log buffer overflow."); // Kept removed
+              // ArduinoCommsSerial.println("ESP32 LogBufOverflow"); // Keep this quiet
               arduinoLogBuffer = ""; 
           }
         }
@@ -269,79 +275,57 @@ void loop() {
     #else 
     if (ArduinoCommsSerial.available() > 0) { while(ArduinoCommsSerial.available()) ArduinoCommsSerial.read(); }
     #endif
-
   } else { 
     static unsigned long lastReconnectAttempt = 0;
     if (millis() - lastReconnectAttempt > 30000) { 
         ArduinoCommsSerial.println("WiFi lost. Reconnecting..."); 
-        WiFi.disconnect(); delay(100); WiFi.mode(WIFI_STA); delay(100);
+        WiFi.disconnect(true); delay(100); WiFi.mode(WIFI_STA); delay(100);
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         lastReconnectAttempt = millis();
+        ArduinoCommsSerial.println("Reconnect attempt initiated.");
     }
   }
-  delay(10);
+  delay(1); 
+}
 
-//TCP/HTTP Command Server Handlers
 void handleRoot() { 
   String html = "<html><body><h1>ESP32-CAM (Primary Serial, Quieter Debug)</h1>";
-  html += "<p>Pan/Tilt commands on port 8081 (POST to /command). GET /ping, GET /signal_video_ready, GET /register_python_client.</p>";
-  html += "<p>Video is sent via UDP to "; 
-  if(pythonClientIPLearned) { html += pythonClientIP.toString(); } else { html += "[Python IP Not Yet Registered]"; }
+  html += "<p>Cmds: port 8081. GET /ping, /signal_video_ready, /register_python_client.</p>";
+  html += "<p>UDP Vid to "; 
+  if(pythonClientIPLearned) { html += pythonClientIP.toString(); } else { html += "[NoPyIP]"; }
   html += ":"; html += String(videoUdpPort); html += ".</p>";
-  #ifndef DISABLE_UDP_LOG_FORWARDING
-    html += "<p>Arduino logs are forwarded via UDP to "; 
-    if(pythonClientIPLearned) { html += pythonClientIP.toString(); } else { html += "[Python IP Not Yet Registered]"; }
-    html += ":"; html += String(logUdpPort); html += ".</p>";
-  #else
-    html += "<p>Arduino log forwarding via UDP is currently DISABLED.</p>";
-  #endif
-  if (WiFi.status() == WL_CONNECTED) { html += "<p>Current IP: " + WiFi.localIP().toString() + "</p>"; }
-  html += "<p>Python Client Ready for Video: "; html += (pythonClientReadyForVideo ? "Yes" : "No - Waiting for /signal_video_ready"); html += "</p>";
+  if (WiFi.status() == WL_CONNECTED) { html += "<p>IP: " + WiFi.localIP().toString() + "</p>"; }
+  html += "<p>VidRdy: "; html += (pythonClientReadyForVideo ? "Y" : "N"); html += "</p>";
   html += "</body></html>";
   commandServer.send(200, "text/html", html);
 }
 
 void handleCommand(void) { 
-  if (WiFi.status() != WL_CONNECTED) { commandServer.send(503, "text/plain", "WiFi not connected."); return; }
-  if (!commandServer.hasArg("plain")) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): HTTP /command - Body not received!"); commandServer.send(400, "text/plain", "Body not received for command"); return; }
+  if (WiFi.status() != WL_CONNECTED) { commandServer.send(503, "text/plain", "NoWiFi"); return; }
+  if (!commandServer.hasArg("plain")) { ArduinoCommsSerial.println("CmdNoBody!"); commandServer.send(400, "text/plain", "NoBody"); return; }
   String base64EncryptedCommand = commandServer.arg("plain");
-  ArduinoCommsSerial.print("ESP32-CAM (SharedSerial): Received Base64 Encrypted Command (len "); 
-  ArduinoCommsSerial.print(base64EncryptedCommand.length()); ArduinoCommsSerial.print(")"); ArduinoCommsSerial.println();
+  // ArduinoCommsSerial.print("EncCmd(len"); ArduinoCommsSerial.print(base64EncryptedCommand.length()); ArduinoCommsSerial.println(")"); 
   String decryptedCommand = decryptCommand(base64EncryptedCommand);
-  if (decryptedCommand.length() == 0) { ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Cmd decryption failed."); commandServer.send(400, "text/plain", "Cmd decryption failed."); return;}
+  if (decryptedCommand.length() == 0) { ArduinoCommsSerial.println("CmdDecryptFail"); commandServer.send(400, "text/plain", "DecryptFail"); return;}
   if (decryptedCommand.startsWith("S") && decryptedCommand.indexOf(':') > 0) {
     ArduinoCommsSerial.println(decryptedCommand); //Send to Arduino via PRIMARY Serial
-    commandServer.send(200, "text/plain", "Encrypted cmd received, decrypted, forwarded: " + decryptedCommand);
+    commandServer.send(200, "text/plain", "OK: " + decryptedCommand);
   } else {
-    ArduinoCommsSerial.print("ESP32-CAM (SharedSerial): Invalid format after decryption: '"); ArduinoCommsSerial.print(decryptedCommand); ArduinoCommsSerial.println("'");
-    commandServer.send(400, "text/plain", "Invalid command format after decryption.");
+    ArduinoCommsSerial.print("InvalidCmdFmt: '"); ArduinoCommsSerial.print(decryptedCommand); ArduinoCommsSerial.println("'");
+    commandServer.send(400, "text/plain", "InvalidCmdFmt");
   }
 }
 
-void handlePing() { 
-    ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Received /ping request on port 8081.");
-    commandServer.send(200, "text/plain", "pong_8081_tcp");
-}
-
-void handleSignalVideoReady() {
-  ArduinoCommsSerial.println("ESP32-CAM (SharedSerial): Received /signal_video_ready from Python client.");
-  pythonClientReadyForVideo = true;
-  commandServer.send(200, "text/plain", "OK, ESP32-CAM will now start sending UDP video if Python IP is registered.");
-}
-
+void handlePing() { ArduinoCommsSerial.println("Pinged"); commandServer.send(200, "text/plain", "pong"); }
+void handleSignalVideoReady() { ArduinoCommsSerial.println("VidRdySig"); pythonClientReadyForVideo = true; commandServer.send(200, "text/plain", "OK,VidStart");}
 void handleRegisterPythonClient() {
-  pythonClientIP = commandServer.client().remoteIP();
-  pythonClientIPLearned = true;
+  pythonClientIP = commandServer.client().remoteIP(); pythonClientIPLearned = true;
   String ipStr = pythonClientIP.toString();
-  ArduinoCommsSerial.print("ESP32-CAM (SharedSerial): Python client registered. UDP Target IP set to: ");
-  ArduinoCommsSerial.println(ipStr);
-  commandServer.send(200, "text/plain", "Python client IP registered for UDP: " + ipStr);
-  
-  ArduinoCommsSerial.println("--- Updated UDP Target ---");
-  ArduinoCommsSerial.print("Will send UDP video to: "); ArduinoCommsSerial.print(pythonClientIP.toString()); 
-  ArduinoCommsSerial.print(":"); ArduinoCommsSerial.println(videoUdpPort);
+  ArduinoCommsSerial.print("PyIPReg: "); ArduinoCommsSerial.println(ipStr);
+  commandServer.send(200, "text/plain", "PyIPReg: " + ipStr);
+  ArduinoCommsSerial.println("--- UDP Target Updated ---");
+  ArduinoCommsSerial.print("UDP Vid To: "); ArduinoCommsSerial.print(pythonClientIP.toString()); ArduinoCommsSerial.print(":"); ArduinoCommsSerial.println(videoUdpPort);
   #ifndef DISABLE_UDP_LOG_FORWARDING
-    ArduinoCommsSerial.print("Will send UDP logs to: "); ArduinoCommsSerial.print(pythonClientIP.toString());
-    ArduinoCommsSerial.print(":"); ArduinoCommsSerial.println(logUdpPort);
+    ArduinoCommsSerial.print("UDP Log To: "); ArduinoCommsSerial.print(pythonClientIP.toString()); ArduinoCommsSerial.print(":"); ArduinoCommsSerial.println(logUdpPort);
   #endif
 }
